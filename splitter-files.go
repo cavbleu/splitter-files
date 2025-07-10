@@ -43,6 +43,32 @@ type OfficeDocumentInfo struct {
 	IsMacro     bool
 }
 
+// ExtractionResult содержит результат извлечения файла
+type ExtractionResult struct {
+	Filename   string
+	Size       int
+	Start      int
+	End        int
+	Counter    int32
+	Error      error
+	FileType   string
+	OfficeInfo *OfficeDocumentInfo
+}
+
+// ExtractionStats содержит статистику по извлечению данных
+type ExtractionStats struct {
+	TotalExtracted int
+	TotalSize      int64
+	InputSize      int64
+	Overlaps       int
+	Coverage       float64
+	UncoveredAreas []struct {
+		Start int
+		End   int
+	}
+	FileTypes map[string]int
+}
+
 // Сигнатуры файлов с валидаторами
 var fileSignatures = []FileSignature{
 	// DOC (Microsoft Word Document)
@@ -158,6 +184,14 @@ type ContentTypes struct {
 	} `xml:"Override"`
 }
 
+// FileChunk представляет часть файла для обработки
+type FileChunk struct {
+	Data     []byte
+	Start    int
+	Counter  int32
+	Priority int
+}
+
 func validateMSOfficeFile(data []byte) bool {
 	if len(data) < 8 {
 		return false
@@ -251,7 +285,6 @@ func validateOfficeOpenXML(expectedContent string, expectedType OfficeFileType) 
 					continue
 				}
 
-				// Улучшенная проверка на шифрование
 				if officeInfo.Type == WordDocument || officeInfo.Type == ExcelDocument || officeInfo.Type == PowerPointDocument {
 					hasEncryptedMarker := bytes.Contains(coreData, []byte("E\x00n\x00c\x00r\x00y\x00p\x00t\x00"))
 					hasEncryptionInfo := bytes.Contains(coreData, []byte("E\x00n\x00c\x00r\x00y\x00p\x00t\x00i\x00o\x00n\x00I\x00n\x00f\x00o"))
@@ -418,28 +451,12 @@ func findFileSignatures(data []byte) []FileSignature {
 	return found
 }
 
-type FileChunk struct {
-	Data     []byte
-	Start    int
-	Counter  int32
-	Priority int
-}
-
-type ExtractionResult struct {
-	Filename   string
-	Size       int
-	Counter    int32
-	Error      error
-	FileType   string
-	OfficeInfo *OfficeDocumentInfo
-}
-
-func extractFile(data []byte, outputDir string, counter int32) (int, string, string, *OfficeDocumentInfo, error) {
+func extractFile(data []byte, outputDir string, counter int32, startPos int) (int, int, string, string, *OfficeDocumentInfo, error) {
 	const minFileSize = 2 * 1024
 
 	foundSigs := findFileSignatures(data)
 	if len(foundSigs) == 0 {
-		return 0, "", "", nil, errors.New("no known file signatures found")
+		return 0, 0, "", "", nil, errors.New("no known file signatures found")
 	}
 
 	sig := foundSigs[0]
@@ -464,12 +481,8 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 				officeInfo.IsMacro = true
 			}
 
-			// Улучшенная проверка на шифрование для бинарных форматов
 			if officeInfo.Type == WordDocument || officeInfo.Type == ExcelDocument || officeInfo.Type == PowerPointDocument {
-				// 1. Проверка стандартного маркера
 				hasEncryptedMarker := bytes.Contains(data, []byte("E\x00n\x00c\x00r\x00y\x00p\x00t\x00"))
-
-				// 2. Проверка сигнатуры шифрования
 				hasEncryptionHeader := false
 				if len(data) > 512 {
 					if bytes.HasPrefix(data[512:], []byte{0xFE, 0xFF, 0xFF, 0xFF}) {
@@ -480,7 +493,6 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 					}
 				}
 
-				// 3. Проверка флагов в заголовке
 				isEncrypted := false
 				if len(data) > 0x200 {
 					var protectionFlagOffset int
@@ -499,12 +511,10 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 					}
 				}
 
-				// 4. Проверка наличия потоков шифрования
 				hasEncryptionStream := bytes.Contains(data, []byte("E\x00n\x00c\x00r\x00y\x00p\x00t\x00i\x00o\x00n\x00I\x00n\x00f\x00o"))
 
 				officeInfo.IsEncrypted = hasEncryptedMarker || hasEncryptionHeader || isEncrypted || hasEncryptionStream
 
-				// 5. Дополнительная проверка для документов с макросами
 				if officeInfo.IsMacro && bytes.Contains(data, []byte("D\x00e\x00f\x00a\x00u\x00l\x00t\x00P\x00a\x00s\x00s\x00w\x00o\x00r\x00d")) {
 					officeInfo.IsEncrypted = true
 				}
@@ -590,7 +600,7 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 	}
 
 	if fileEnd < minFileSize {
-		return 0, "", "", nil, fmt.Errorf("file too small (less than %d bytes)", minFileSize)
+		return 0, 0, "", "", nil, fmt.Errorf("file too small (less than %d bytes)", minFileSize)
 	}
 
 	fileData := data[:fileEnd]
@@ -598,16 +608,16 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 	filename := filepath.Join(outputDir, fmt.Sprintf("file_%04d.%s", counter, ext))
 	err := ioutil.WriteFile(filename, fileData, 0644)
 	if err != nil {
-		return 0, "", "", nil, fmt.Errorf("failed to write file %s: %v", filename, err)
+		return 0, 0, "", "", nil, fmt.Errorf("failed to write file %s: %v", filename, err)
 	}
 
-	return fileEnd, filename, fileType, officeInfo, nil
+	return fileEnd, startPos + fileEnd, filename, fileType, officeInfo, nil
 }
 
 func worker(id int, jobs <-chan FileChunk, results chan<- ExtractionResult, outputDir string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for chunk := range jobs {
-		processed, filename, fileType, officeInfo, err := extractFile(chunk.Data, outputDir, chunk.Counter)
+		size, endPos, filename, fileType, officeInfo, err := extractFile(chunk.Data, outputDir, chunk.Counter, chunk.Start)
 		if err != nil {
 			results <- ExtractionResult{
 				Error:   fmt.Errorf("worker %d: %v", id, err),
@@ -618,7 +628,9 @@ func worker(id int, jobs <-chan FileChunk, results chan<- ExtractionResult, outp
 
 		results <- ExtractionResult{
 			Filename:   filename,
-			Size:       processed,
+			Size:       size,
+			Start:      chunk.Start,
+			End:        endPos,
 			Counter:    chunk.Counter,
 			FileType:   fileType,
 			OfficeInfo: officeInfo,
@@ -664,7 +676,47 @@ func getPhysicalCPUCount() int {
 	return runtime.NumCPU()
 }
 
-func processFile(data []byte, outputDir string, numWorkers int) (int, []ExtractionResult, error) {
+func analyzeUncoveredAreas(covered []bool) []struct{ Start, End int } {
+	var uncovered []struct{ Start, End int }
+	inUncovered := false
+	start := 0
+
+	for i, v := range covered {
+		if !v && !inUncovered {
+			inUncovered = true
+			start = i
+		} else if v && inUncovered {
+			inUncovered = false
+			uncovered = append(uncovered, struct{ Start, End int }{start, i - 1})
+		}
+	}
+
+	if inUncovered {
+		uncovered = append(uncovered, struct{ Start, End int }{start, len(covered) - 1})
+	}
+
+	// Объединяем близкие участки
+	if len(uncovered) > 1 {
+		merged := make([]struct{ Start, End int }, 0)
+		prev := uncovered[0]
+
+		for i := 1; i < len(uncovered); i++ {
+			current := uncovered[i]
+			if current.Start-prev.End < 1024 { // Объединяем если расстояние меньше 1KB
+				prev.End = current.End
+			} else {
+				merged = append(merged, prev)
+				prev = current
+			}
+		}
+		merged = append(merged, prev)
+		return merged
+	}
+
+	return uncovered
+}
+
+func processFile(data []byte, outputDir string, numWorkers int) (int, []ExtractionResult, *ExtractionStats, error) {
 	jobs := make(chan FileChunk, numWorkers*2)
 	results := make(chan ExtractionResult, numWorkers*2)
 
@@ -674,20 +726,46 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 		go worker(i, jobs, results, outputDir, &wg)
 	}
 
+	stats := &ExtractionStats{
+		InputSize: int64(len(data)),
+		FileTypes: make(map[string]int),
+	}
+
 	var extractedFiles int32
 	var allResults []ExtractionResult
 	var processingErrors []error
 	var resultWg sync.WaitGroup
 	resultWg.Add(1)
+
 	go func() {
 		defer resultWg.Done()
+		extractedRanges := make([][2]int, 0)
+
 		for result := range results {
 			if result.Error != nil {
 				processingErrors = append(processingErrors, result.Error)
 				continue
 			}
+
 			atomic.AddInt32(&extractedFiles, 1)
 			allResults = append(allResults, result)
+			stats.TotalSize += int64(result.Size)
+			stats.FileTypes[result.FileType]++
+
+			newRange := [2]int{result.Start, result.End}
+			overlapFound := false
+
+			for _, r := range extractedRanges {
+				if newRange[0] < r[1] && newRange[1] > r[0] {
+					stats.Overlaps++
+					overlapFound = true
+					break
+				}
+			}
+
+			if !overlapFound {
+				extractedRanges = append(extractedRanges, newRange)
+			}
 
 			if result.OfficeInfo != nil {
 				var officeType string
@@ -702,7 +780,8 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 					officeType = "Unknown Office"
 				}
 
-				info := fmt.Sprintf("Extracted %s (%s, %d bytes)", result.Filename, officeType, result.Size)
+				info := fmt.Sprintf("Extracted %s (%s, %d bytes, pos %d-%d)",
+					filepath.Base(result.Filename), officeType, result.Size, result.Start, result.End)
 				if result.OfficeInfo.IsEncrypted {
 					info += " [ENCRYPTED]"
 				}
@@ -715,9 +794,37 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 
 				fmt.Println(info)
 			} else {
-				fmt.Printf("Extracted %s (%s, %d bytes)\n", result.Filename, result.FileType, result.Size)
+				fmt.Printf("Extracted %s (%s, %d bytes, pos %d-%d)\n",
+					filepath.Base(result.Filename), result.FileType, result.Size, result.Start, result.End)
 			}
 		}
+
+		// Анализ покрытия данных
+		covered := make([]bool, len(data))
+		for _, r := range extractedRanges {
+			start := r[0]
+			if start < 0 {
+				start = 0
+			}
+			end := r[1]
+			if end > len(data) {
+				end = len(data)
+			}
+			for i := start; i < end; i++ {
+				covered[i] = true
+			}
+		}
+
+		coveredCount := 0
+		for _, v := range covered {
+			if v {
+				coveredCount++
+			}
+		}
+
+		stats.Coverage = float64(coveredCount) / float64(len(data)) * 100
+		stats.TotalExtracted = int(extractedFiles)
+		stats.UncoveredAreas = analyzeUncoveredAreas(covered)
 	}()
 
 	pos := 0
@@ -792,10 +899,47 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 	resultWg.Wait()
 
 	if len(processingErrors) > 0 {
-		return int(extractedFiles), allResults, fmt.Errorf("encountered %d processing errors", len(processingErrors))
+		return int(extractedFiles), allResults, stats, fmt.Errorf("encountered %d processing errors", len(processingErrors))
 	}
 
-	return int(extractedFiles), allResults, nil
+	return int(extractedFiles), allResults, stats, nil
+}
+
+func printStats(stats *ExtractionStats) {
+	fmt.Printf("\n=== Detailed Statistics ===\n")
+	fmt.Printf("Input file size:       %d bytes\n", stats.InputSize)
+	fmt.Printf("Extracted files:       %d\n", stats.TotalExtracted)
+	fmt.Printf("Total extracted size:  %d bytes\n", stats.TotalSize)
+	fmt.Printf("Data coverage:         %.2f%%\n", stats.Coverage)
+	fmt.Printf("Overlaps detected:     %d\n", stats.Overlaps)
+
+	if stats.Coverage < 90.0 {
+		fmt.Printf("\nWarning: Low data coverage (%.2f%%). Possible issues with file detection.\n", stats.Coverage)
+	}
+
+	if float64(stats.TotalSize) > float64(stats.InputSize)*1.1 {
+		fmt.Printf("\nWarning: Extracted data size (%.2f%%) exceeds input size. Possible overlaps or false positives.\n",
+			float64(stats.TotalSize)/float64(stats.InputSize)*100)
+	}
+
+	fmt.Printf("\nFile types distribution:\n")
+	for fileType, count := range stats.FileTypes {
+		fmt.Printf("- %-30s: %d\n", fileType, count)
+	}
+
+	if len(stats.UncoveredAreas) > 0 {
+		fmt.Printf("\nUncovered areas (total %d):\n", len(stats.UncoveredAreas))
+		for i, area := range stats.UncoveredAreas {
+			size := area.End - area.Start + 1
+			if i < 10 || size > 1024 { // Показываем первые 10 или большие участки
+				fmt.Printf("- %8d - %8d (%6d bytes)\n", area.Start, area.End, size)
+			}
+			if i == 10 && len(stats.UncoveredAreas) > 10 {
+				fmt.Printf("  ... and %d more uncovered areas\n", len(stats.UncoveredAreas)-10)
+				break
+			}
+		}
+	}
 }
 
 func main() {
@@ -828,52 +972,39 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Processing file %s (%d bytes) with %d workers (physical cores)\n", inputFile, len(data), numWorkers)
+	fmt.Printf("Processing file %s (%d bytes) with %d workers (physical cores)\n",
+		inputFile, len(data), numWorkers)
 
-	extracted, results, err := processFile(data, outputDir, numWorkers)
+	startTime := time.Now()
+	_, results, stats, err := processFile(data, outputDir, numWorkers)
+	elapsed := time.Since(startTime)
+
 	if err != nil {
 		fmt.Printf("Processing completed with errors: %v\n", err)
 	}
 
-	fmt.Printf("\n=== Summary ===\n")
-	fmt.Printf("Extracted %d files to %s\n", extracted, outputDir)
+	printStats(stats)
 
 	var officeFiles int
+	var encryptedFiles int
+	var macroFiles int
 	for _, res := range results {
 		if res.OfficeInfo != nil {
 			officeFiles++
+			if res.OfficeInfo.IsEncrypted {
+				encryptedFiles++
+			}
+			if res.OfficeInfo.IsMacro {
+				macroFiles++
+			}
 		}
 	}
 
 	if officeFiles > 0 {
 		fmt.Printf("\nOffice documents found: %d\n", officeFiles)
-		for _, res := range results {
-			if res.OfficeInfo != nil {
-				var docType string
-				switch res.OfficeInfo.Type {
-				case WordDocument:
-					docType = "Word"
-				case ExcelDocument:
-					docType = "Excel"
-				case PowerPointDocument:
-					docType = "PowerPoint"
-				default:
-					docType = "Unknown"
-				}
-
-				info := fmt.Sprintf("- %s (%s)", filepath.Base(res.Filename), docType)
-				if res.OfficeInfo.IsEncrypted {
-					info += " [ENCRYPTED]"
-				}
-				if res.OfficeInfo.IsMacro {
-					info += " [MACROS]"
-				}
-				if res.OfficeInfo.Version != "" {
-					info += fmt.Sprintf(" [v%s]", res.OfficeInfo.Version)
-				}
-
-				fmt.Println(info)
-			}
-		}
+		fmt.Printf("- Encrypted: %d\n", encryptedFiles)
+		fmt.Printf("- With macros: %d\n", macroFiles)
 	}
+
+	fmt.Printf("\nProcessing completed in %s\n", elapsed)
 }
