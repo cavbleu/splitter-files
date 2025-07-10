@@ -136,7 +136,7 @@ func validateOfficeOpenXML(contentType string) func([]byte) bool {
 			return false
 		}
 
-		// Проверяем наличие обязательных файлов в структуре Office Open XML
+		// Проверяе наличие обязательных файлов в структуре Office Open XML
 		requiredFiles := map[string]bool{
 			"[Content_Types].xml": false,
 		}
