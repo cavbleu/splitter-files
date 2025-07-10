@@ -158,20 +158,16 @@ type ContentTypes struct {
 	} `xml:"Override"`
 }
 
-// validateMSOfficeFile проверяет, является ли файл документом MS Office (DOC, PPT, XLS)
 func validateMSOfficeFile(data []byte) bool {
 	if len(data) < 8 {
 		return false
 	}
 
-	// Проверка базовой сигнатуры
 	if !bytes.Equal(data[:8], []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}) {
 		return false
 	}
 
-	// Дополнительные проверки для определения типа документа
 	if len(data) > 512 {
-		// Проверка на наличие стандартных потоков
 		hasWordDocument := bytes.Contains(data, []byte("WordDocument"))
 		hasWorkbook := bytes.Contains(data, []byte("Workbook"))
 		hasPowerPoint := bytes.Contains(data, []byte("PowerPoint"))
@@ -182,14 +178,12 @@ func validateMSOfficeFile(data []byte) bool {
 	return true
 }
 
-// validateOfficeOpenXML возвращает функцию для проверки конкретного типа Office Open XML файла
 func validateOfficeOpenXML(expectedContent string, expectedType OfficeFileType) func([]byte) bool {
 	return func(data []byte) bool {
 		if !validateZipFile(data) {
 			return false
 		}
 
-		// Пытаемся прочитать как ZIP-архив
 		zipReader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
 			return false
@@ -199,7 +193,6 @@ func validateOfficeOpenXML(expectedContent string, expectedType OfficeFileType) 
 		var hasContentTypes bool
 		var officeInfo OfficeDocumentInfo
 
-		// Проверяем структуру архива
 		for _, file := range zipReader.File {
 			switch file.Name {
 			case "[Content_Types].xml":
@@ -218,7 +211,6 @@ func validateOfficeOpenXML(expectedContent string, expectedType OfficeFileType) 
 				if err == nil {
 					hasContentTypes = true
 
-					// Анализ содержимого для определения типа документа
 					for _, override := range contentTypes.Override {
 						switch {
 						case strings.Contains(override.ContentType, "wordprocessing"):
@@ -243,7 +235,6 @@ func validateOfficeOpenXML(expectedContent string, expectedType OfficeFileType) 
 					continue
 				}
 
-				// Проверка на макросы
 				if bytes.Contains(appData, []byte("VBAProject")) {
 					officeInfo.IsMacro = true
 				}
@@ -260,12 +251,13 @@ func validateOfficeOpenXML(expectedContent string, expectedType OfficeFileType) 
 					continue
 				}
 
-				// Проверка на защиту паролем
-				if bytes.Contains(coreData, []byte("encrypted")) {
-					officeInfo.IsEncrypted = true
+				// Улучшенная проверка на шифрование
+				if officeInfo.Type == WordDocument || officeInfo.Type == ExcelDocument || officeInfo.Type == PowerPointDocument {
+					hasEncryptedMarker := bytes.Contains(coreData, []byte("E\x00n\x00c\x00r\x00y\x00p\x00t\x00"))
+					hasEncryptionInfo := bytes.Contains(coreData, []byte("E\x00n\x00c\x00r\x00y\x00p\x00t\x00i\x00o\x00n\x00I\x00n\x00f\x00o"))
+					officeInfo.IsEncrypted = hasEncryptedMarker || hasEncryptionInfo
 				}
 
-				// Извлечение версии приложения
 				if re := regexp.MustCompile(`<cp:revision>(\d+)</cp:revision>`); re.Match(coreData) {
 					matches := re.FindSubmatch(coreData)
 					if len(matches) > 1 {
@@ -275,17 +267,14 @@ func validateOfficeOpenXML(expectedContent string, expectedType OfficeFileType) 
 			}
 		}
 
-		// Проверяем обязательные условия
 		if !hasContentTypes {
 			return false
 		}
 
-		// Проверяем ожидаемый тип документа
 		if officeInfo.Type != expectedType {
 			return false
 		}
 
-		// Дополнительная проверка на ожидаемый контент
 		for _, defaultType := range contentTypes.Default {
 			if strings.Contains(defaultType.ContentType, expectedContent) {
 				return true
@@ -296,7 +285,6 @@ func validateOfficeOpenXML(expectedContent string, expectedType OfficeFileType) 
 	}
 }
 
-// validateZipFile проверяет, является ли файл ZIP-архивом
 func validateZipFile(data []byte) bool {
 	if len(data) < 4 {
 		return false
@@ -304,13 +292,11 @@ func validateZipFile(data []byte) bool {
 	return bytes.Equal(data[:4], []byte{0x50, 0x4B, 0x03, 0x04})
 }
 
-// validateOpenDocument проверяет OpenDocument файлы
 func validateOpenDocument(data []byte) bool {
 	if !validateZipFile(data) {
 		return false
 	}
 
-	// Пытаемся прочитать как ZIP-архив
 	zipReader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return false
@@ -344,16 +330,13 @@ func validateOpenDocument(data []byte) bool {
 	return hasMimetype && hasContent
 }
 
-// validateJpeg проверяет JPEG файл
 func validateJpeg(data []byte) bool {
 	if len(data) < 4 {
 		return false
 	}
-	// Начало JPEG
 	if !bytes.Equal(data[:3], []byte{0xFF, 0xD8, 0xFF}) {
 		return false
 	}
-	// Проверяем маркер окончания
 	if len(data) >= 20 {
 		for i := len(data) - 2; i >= 0; i-- {
 			if data[i] == 0xFF && data[i+1] == 0xD9 {
@@ -364,19 +347,15 @@ func validateJpeg(data []byte) bool {
 	return false
 }
 
-// validatePdf проверяет PDF файл (улучшенная версия)
 func validatePdf(data []byte) bool {
-	// Минимальный размер PDF - 100 байт (практически не бывает меньше)
 	if len(data) < 100 {
 		return false
 	}
 
-	// 1. Проверка заголовка PDF
 	if !bytes.HasPrefix(data, []byte("%PDF-")) {
 		return false
 	}
 
-	// 2. Проверка версии PDF (1.0-2.0)
 	if len(data) >= 8 {
 		version := string(data[5:8])
 		if version < "1.0" || version > "2.0" {
@@ -384,24 +363,19 @@ func validatePdf(data []byte) bool {
 		}
 	}
 
-	// 3. Проверка наличия xref таблицы (косвенно указывает на валидность структуры)
 	if !bytes.Contains(data, []byte("xref")) {
 		return false
 	}
 
-	// 4. Проверка наличия объектов (должен быть хотя бы один)
 	if !bytes.Contains(data, []byte(" 0 obj")) && !bytes.Contains(data, []byte("\n0 obj")) {
 		return false
 	}
 
-	// 5. Проверка конца файла
 	eofPos := bytes.LastIndex(data, []byte("%%EOF"))
 	if eofPos == -1 {
 		return false
 	}
 
-	// 6. Проверка корректного конечного маркера
-	// Должен быть либо %%EOF, либо %%EOF\r, либо %%EOF\n, либо %%EOF\r\n
 	if eofPos+5 < len(data) {
 		trailer := data[eofPos+5]
 		if trailer != '\r' && trailer != '\n' && trailer != ' ' && trailer != '\t' {
@@ -409,7 +383,6 @@ func validatePdf(data []byte) bool {
 		}
 	}
 
-	// 7. Проверка на линейные PDF (должен быть startxref перед %%EOF)
 	if !bytes.Contains(data[:eofPos], []byte("startxref")) {
 		return false
 	}
@@ -417,7 +390,6 @@ func validatePdf(data []byte) bool {
 	return true
 }
 
-// findFileSignatures ищет все известные сигнатуры в данных
 func findFileSignatures(data []byte) []FileSignature {
 	var found []FileSignature
 
@@ -434,7 +406,6 @@ func findFileSignatures(data []byte) []FileSignature {
 		}
 
 		if bytes.Equal(data[offset:end], sig.MagicNumber) {
-			// Если есть валидатор, проверяем файл
 			if sig.Validator != nil {
 				if !sig.Validator(data) {
 					continue
@@ -447,15 +418,13 @@ func findFileSignatures(data []byte) []FileSignature {
 	return found
 }
 
-// FileChunk представляет часть данных для обработки
 type FileChunk struct {
 	Data     []byte
 	Start    int
 	Counter  int32
-	Priority int // 0 - normal, 1 - high (for office files)
+	Priority int
 }
 
-// ExtractionResult содержит результат извлечения файла
 type ExtractionResult struct {
 	Filename   string
 	Size       int
@@ -465,28 +434,23 @@ type ExtractionResult struct {
 	OfficeInfo *OfficeDocumentInfo
 }
 
-// extractFile пытается извлечь файл из данных
 func extractFile(data []byte, outputDir string, counter int32) (int, string, string, *OfficeDocumentInfo, error) {
-	const minFileSize = 2 * 1024 // 2 KB minimum file size
+	const minFileSize = 2 * 1024
 
 	foundSigs := findFileSignatures(data)
 	if len(foundSigs) == 0 {
 		return 0, "", "", nil, errors.New("no known file signatures found")
 	}
 
-	// Выбираем первую подходящую сигнатуру
 	sig := foundSigs[0]
 	ext := sig.Extension
 	fileType := strings.ToUpper(ext)
 
 	var officeInfo *OfficeDocumentInfo
-	// Удалена неиспользуемая переменная isOfficeFile
 
-	// Для Office-файлов собираем дополнительную информацию
 	if strings.HasPrefix(ext, "doc") || strings.HasPrefix(ext, "xls") || strings.HasPrefix(ext, "ppt") {
 		officeInfo = &OfficeDocumentInfo{}
 
-		// Для старых форматов Office
 		if ext == "doc" || ext == "xls" || ext == "ppt" {
 			if bytes.Contains(data, []byte("WordDocument")) {
 				officeInfo.Type = WordDocument
@@ -496,19 +460,58 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 				officeInfo.Type = PowerPointDocument
 			}
 
-			// Проверка на макросы
 			if bytes.Contains(data, []byte("_VBA_PROJECT")) {
 				officeInfo.IsMacro = true
 			}
 
-			// Проверка на шифрование (упрощенная)
-			if bytes.Contains(data, []byte("E\x00n\x00c\x00r\x00y\x00p\x00t\x00")) {
-				officeInfo.IsEncrypted = true
+			// Улучшенная проверка на шифрование для бинарных форматов
+			if officeInfo.Type == WordDocument || officeInfo.Type == ExcelDocument || officeInfo.Type == PowerPointDocument {
+				// 1. Проверка стандартного маркера
+				hasEncryptedMarker := bytes.Contains(data, []byte("E\x00n\x00c\x00r\x00y\x00p\x00t\x00"))
+
+				// 2. Проверка сигнатуры шифрования
+				hasEncryptionHeader := false
+				if len(data) > 512 {
+					if bytes.HasPrefix(data[512:], []byte{0xFE, 0xFF, 0xFF, 0xFF}) {
+						hasEncryptionHeader = true
+					}
+					if bytes.Contains(data[:512], []byte("E\x00n\x00c\x00r\x00y\x00p\x00t\x00P\x00a\x00c\x00k\x00a\x00g\x00e")) {
+						hasEncryptionHeader = true
+					}
+				}
+
+				// 3. Проверка флагов в заголовке
+				isEncrypted := false
+				if len(data) > 0x200 {
+					var protectionFlagOffset int
+					switch officeInfo.Type {
+					case WordDocument:
+						protectionFlagOffset = 0x0B
+					case ExcelDocument:
+						protectionFlagOffset = 0x2F
+					case PowerPointDocument:
+						protectionFlagOffset = 0x0F
+					}
+
+					if protectionFlagOffset > 0 && len(data) > protectionFlagOffset {
+						protectionFlag := data[protectionFlagOffset]
+						isEncrypted = (protectionFlag & 0x01) != 0
+					}
+				}
+
+				// 4. Проверка наличия потоков шифрования
+				hasEncryptionStream := bytes.Contains(data, []byte("E\x00n\x00c\x00r\x00y\x00p\x00t\x00i\x00o\x00n\x00I\x00n\x00f\x00o"))
+
+				officeInfo.IsEncrypted = hasEncryptedMarker || hasEncryptionHeader || isEncrypted || hasEncryptionStream
+
+				// 5. Дополнительная проверка для документов с макросами
+				if officeInfo.IsMacro && bytes.Contains(data, []byte("D\x00e\x00f\x00a\x00u\x00l\x00t\x00P\x00a\x00s\x00s\x00w\x00o\x00r\x00d")) {
+					officeInfo.IsEncrypted = true
+				}
 			}
 		}
 	}
 
-	// Определяем длину файла (эвристически)
 	fileEnd := len(data)
 	for i := 1; i < len(fileSignatures); i++ {
 		otherSig := fileSignatures[i]
@@ -516,17 +519,14 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 			continue
 		}
 
-		// Ищем следующую сигнатуру
 		idx := bytes.Index(data, otherSig.MagicNumber)
 		if idx != -1 && idx < fileEnd && idx > 0 {
 			fileEnd = idx
 		}
 	}
 
-	// Для некоторых форматов определяем конец файла специальным образом
 	switch ext {
 	case "jpg", "jpeg":
-		// Ищем маркер конца JPEG
 		for i := len(data) - 2; i >= 0; i-- {
 			if data[i] == 0xFF && data[i+1] == 0xD9 {
 				fileEnd = i + 2
@@ -535,10 +535,8 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 		}
 		fileType = "JPEG Image"
 	case "pdf":
-		// Ищем конец PDF (улучшенная проверка)
 		if idx := bytes.LastIndex(data, []byte("%%EOF")); idx != -1 {
 			fileEnd = idx + 5
-			// Проверяем корректность конца файла
 			if fileEnd < len(data) {
 				trailer := data[fileEnd]
 				if trailer == '\r' || trailer == '\n' {
@@ -550,9 +548,8 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 		}
 		fileType = "PDF Document"
 	case "zip", "docx", "xlsx", "pptx", "odt":
-		// Для ZIP-подобных файлов ищем конец центрального каталога
 		if idx := bytes.LastIndex(data, []byte{0x50, 0x4B, 0x05, 0x06}); idx != -1 {
-			fileEnd = idx + 22 // 22 - размер End of central directory record
+			fileEnd = idx + 22
 		}
 
 		switch ext {
@@ -579,9 +576,7 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 		fileType = "HTML Document"
 	}
 
-	// Если не удалось определить конец файла, берем до следующей сигнатуры или до конца данных
 	if fileEnd == len(data) {
-		// Ищем следующую сигнатуру такого же типа
 		if len(data) > 100 {
 			nextSig := bytes.Index(data[1:], sig.MagicNumber)
 			if nextSig != -1 {
@@ -590,19 +585,16 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 		}
 	}
 
-	// Ограничиваем максимальный размер файла
 	if fileEnd > len(data) {
 		fileEnd = len(data)
 	}
 
-	// Проверяем минимальный размер файла
 	if fileEnd < minFileSize {
 		return 0, "", "", nil, fmt.Errorf("file too small (less than %d bytes)", minFileSize)
 	}
 
 	fileData := data[:fileEnd]
 
-	// Создаем имя файла
 	filename := filepath.Join(outputDir, fmt.Sprintf("file_%04d.%s", counter, ext))
 	err := ioutil.WriteFile(filename, fileData, 0644)
 	if err != nil {
@@ -612,7 +604,6 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 	return fileEnd, filename, fileType, officeInfo, nil
 }
 
-// worker обрабатывает задачи из канала и отправляет результаты
 func worker(id int, jobs <-chan FileChunk, results chan<- ExtractionResult, outputDir string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for chunk := range jobs {
@@ -635,17 +626,10 @@ func worker(id int, jobs <-chan FileChunk, results chan<- ExtractionResult, outp
 	}
 }
 
-// getPhysicalCPUCount возвращает количество физических ядер процессора
 func getPhysicalCPUCount() int {
-	// По умолчанию возвращаем количество логических процессоров
-	// Для Linux/Unix можно прочитать /proc/cpuinfo для получения физических ядер
-	// Для Windows используем runtime.NumCPU() (нет простого способа получить физические ядра)
-
-	// Для Linux/Unix/MacOS
 	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" || runtime.GOOS == "freebsd" {
 		data, err := ioutil.ReadFile("/proc/cpuinfo")
 		if err == nil {
-			// Подсчитываем количество уникальных физических ядер
 			physicalIDs := make(map[string]bool)
 			re := regexp.MustCompile(`physical id\s*:\s*(\d+)`)
 			matches := re.FindAllStringSubmatch(string(data), -1)
@@ -656,7 +640,6 @@ func getPhysicalCPUCount() int {
 			}
 
 			if len(physicalIDs) > 0 {
-				// Теперь подсчитываем ядра на каждом физическом процессоре
 				coresPerCPU := make(map[string]int)
 				reCore := regexp.MustCompile(`physical id\s*:\s*(\d+).*?cpu cores\s*:\s*(\d+)`)
 				matchesCore := reCore.FindAllStringSubmatch(string(data), -1)
@@ -678,24 +661,19 @@ func getPhysicalCPUCount() int {
 		}
 	}
 
-	// Возвращаем количество логических процессоров, если не удалось определить физические
 	return runtime.NumCPU()
 }
 
-// processFile обрабатывает входной файл многопоточно
 func processFile(data []byte, outputDir string, numWorkers int) (int, []ExtractionResult, error) {
-	// Создаем каналы для задач и результатов
 	jobs := make(chan FileChunk, numWorkers*2)
 	results := make(chan ExtractionResult, numWorkers*2)
 
-	// Создаем воркеров
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go worker(i, jobs, results, outputDir, &wg)
 	}
 
-	// Запускаем горутину для сбора результатов
 	var extractedFiles int32
 	var allResults []ExtractionResult
 	var processingErrors []error
@@ -711,7 +689,6 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 			atomic.AddInt32(&extractedFiles, 1)
 			allResults = append(allResults, result)
 
-			// Детальная информация для Office-файлов
 			if result.OfficeInfo != nil {
 				var officeType string
 				switch result.OfficeInfo.Type {
@@ -743,18 +720,14 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 		}
 	}()
 
-	// Отправляем задачи воркерам с улучшенной логикой управления потоком
 	pos := 0
 	var counter int32 = 1
-	const maxRetries = 3
 	const backoffTime = 100 * time.Millisecond
 
-	// Приоритетная очередь для Office файлов
 	officeQueue := make([]FileChunk, 0)
 	regularQueue := make([]FileChunk, 0)
 
 	for pos < len(data) || len(officeQueue) > 0 || len(regularQueue) > 0 {
-		// Сначала обрабатываем очередь Office файлов
 		if len(officeQueue) > 0 {
 			chunk := officeQueue[0]
 			select {
@@ -762,12 +735,10 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 				officeQueue = officeQueue[1:]
 				counter++
 			case <-time.After(backoffTime):
-				// Канал полон, ждем и оставляем в очереди
 			}
 			continue
 		}
 
-		// Затем обрабатываем обычную очередь
 		if len(regularQueue) > 0 {
 			chunk := regularQueue[0]
 			select {
@@ -775,19 +746,16 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 				regularQueue = regularQueue[1:]
 				counter++
 			case <-time.After(backoffTime):
-				// Канал полон, ждем и оставляем в очереди
 			}
 			continue
 		}
 
-		// Если очереди пусты, добавляем новые задачи
 		if pos < len(data) {
 			remaining := data[pos:]
-			if len(remaining) < 8 { // Минимальный размер для любой сигнатуры
+			if len(remaining) < 8 {
 				break
 			}
 
-			// Проверяем, является ли это Office файлом
 			var isOfficeFile bool
 			foundSigs := findFileSignatures(remaining)
 			for _, sig := range foundSigs {
@@ -799,7 +767,6 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 				}
 			}
 
-			// Создаем задачу для воркера
 			chunk := FileChunk{
 				Data:     remaining,
 				Start:    pos,
@@ -818,15 +785,12 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 		}
 	}
 
-	// Закрываем канал задач и ждем завершения воркеров
 	close(jobs)
 	wg.Wait()
 
-	// Закрываем канал результатов и ждем завершения сборщика результатов
 	close(results)
 	resultWg.Wait()
 
-	// Проверяем ошибки
 	if len(processingErrors) > 0 {
 		return int(extractedFiles), allResults, fmt.Errorf("encountered %d processing errors", len(processingErrors))
 	}
@@ -844,7 +808,6 @@ func main() {
 	inputFile := os.Args[1]
 	outputDir := os.Args[2]
 
-	// Определяем количество воркеров (по умолчанию - количество физических ядер)
 	numWorkers := getPhysicalCPUCount()
 	if len(os.Args) > 3 {
 		_, err := fmt.Sscanf(os.Args[3], "%d", &numWorkers)
@@ -853,14 +816,12 @@ func main() {
 		}
 	}
 
-	// Читаем входной файл
 	data, err := ioutil.ReadFile(inputFile)
 	if err != nil {
 		fmt.Printf("Error reading input file: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Создаем выходную директорию
 	err = os.MkdirAll(outputDir, 0755)
 	if err != nil {
 		fmt.Printf("Error creating output directory: %v\n", err)
@@ -869,13 +830,11 @@ func main() {
 
 	fmt.Printf("Processing file %s (%d bytes) with %d workers (physical cores)\n", inputFile, len(data), numWorkers)
 
-	// Обрабатываем файл многопоточно
 	extracted, results, err := processFile(data, outputDir, numWorkers)
 	if err != nil {
 		fmt.Printf("Processing completed with errors: %v\n", err)
 	}
 
-	// Выводим сводную информацию
 	fmt.Printf("\n=== Summary ===\n")
 	fmt.Printf("Extracted %d files to %s\n", extracted, outputDir)
 
