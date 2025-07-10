@@ -23,42 +23,42 @@ var fileSignatures = []FileSignature{
 		Extension:   "doc",
 		MagicNumber: []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1},
 		Offset:      0,
-		Validator:   validateCompoundFile,
+		Validator:   validateMSOfficeFile,
 	},
 	// DOCX (Office Open XML)
 	{
 		Extension:   "docx",
 		MagicNumber: []byte{0x50, 0x4B, 0x03, 0x04},
 		Offset:      0,
-		Validator:   validateZipFile,
+		Validator:   validateOfficeOpenXML("word/"),
 	},
 	// PPT (Microsoft PowerPoint)
 	{
 		Extension:   "ppt",
 		MagicNumber: []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1},
 		Offset:      0,
-		Validator:   validateCompoundFile,
+		Validator:   validateMSOfficeFile,
 	},
 	// PPTX (Office Open XML Presentation)
 	{
 		Extension:   "pptx",
 		MagicNumber: []byte{0x50, 0x4B, 0x03, 0x04},
 		Offset:      0,
-		Validator:   validateZipFile,
+		Validator:   validateOfficeOpenXML("ppt/"),
 	},
 	// XLS (Microsoft Excel)
 	{
 		Extension:   "xls",
 		MagicNumber: []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1},
 		Offset:      0,
-		Validator:   validateCompoundFile,
+		Validator:   validateMSOfficeFile,
 	},
 	// XLSX (Office Open XML Workbook)
 	{
 		Extension:   "xlsx",
 		MagicNumber: []byte{0x50, 0x4B, 0x03, 0x04},
 		Offset:      0,
-		Validator:   validateZipFile,
+		Validator:   validateOfficeOpenXML("xl/"),
 	},
 	// JPEG
 	{
@@ -80,21 +80,6 @@ var fileSignatures = []FileSignature{
 		Offset:      0,
 		Validator:   validatePdf,
 	},
-	// TXT (простой текст, нет стандартной сигнатуры)
-	{
-		Extension: "txt",
-		Validator: validateText,
-	},
-	// LNK (Windows Shortcut)
-	{
-		Extension:   "lnk",
-		MagicNumber: []byte{0x4C, 0x00, 0x00, 0x00, 0x01, 0x14, 0x02, 0x00},
-		Offset:      0,
-	},
-	// TMP (временный файл, нет стандартной сигнатуры)
-	{
-		Extension: "tmp",
-	},
 	// RTF (Rich Text Format)
 	{
 		Extension:   "rtf",
@@ -106,7 +91,7 @@ var fileSignatures = []FileSignature{
 		Extension:   "odt",
 		MagicNumber: []byte{0x50, 0x4B, 0x03, 0x04},
 		Offset:      0,
-		Validator:   validateZipFile,
+		Validator:   validateOpenDocument,
 	},
 	// ZIP
 	{
@@ -114,32 +99,6 @@ var fileSignatures = []FileSignature{
 		MagicNumber: []byte{0x50, 0x4B, 0x03, 0x04},
 		Offset:      0,
 		Validator:   validateZipFile,
-	},
-	// GZ
-	{
-		Extension:   "gz",
-		MagicNumber: []byte{0x1F, 0x8B},
-		Offset:      0,
-	},
-	// 7Z
-	{
-		Extension:   "7z",
-		MagicNumber: []byte{0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C},
-		Offset:      0,
-	},
-	// EXE (PE executable)
-	{
-		Extension:   "exe",
-		MagicNumber: []byte{0x4D, 0x5A},
-		Offset:      0,
-		Validator:   validatePE,
-	},
-	// DLL (PE executable)
-	{
-		Extension:   "dll",
-		MagicNumber: []byte{0x4D, 0x5A},
-		Offset:      0,
-		Validator:   validatePE,
 	},
 	// HTML
 	{
@@ -159,16 +118,49 @@ var fileSignatures = []FileSignature{
 	},
 }
 
-// validateCompoundFile проверяет, является ли файл Compound File Binary Format
-func validateCompoundFile(data []byte) bool {
+// validateMSOfficeFile проверяет, является ли файл документом MS Office (DOC, PPT, XLS)
+func validateMSOfficeFile(data []byte) bool {
 	if len(data) < 8 {
 		return false
 	}
-	// Проверяем сигнатуру
-	if !bytes.Equal(data[:8], []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}) {
-		return false
+	return bytes.Equal(data[:8], []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1})
+}
+
+// validateOfficeOpenXML возвращает функцию для проверки конкретного типа Office Open XML файла
+func validateOfficeOpenXML(contentType string) func([]byte) bool {
+	return func(data []byte) bool {
+		if !validateZipFile(data) {
+			return false
+		}
+
+		// Проверяем наличие обязательных файлов в структуре Office Open XML
+		requiredFiles := map[string]bool{
+			"[Content_Types].xml": false,
+		}
+
+		// Проверяем наличие специфичного для типа документа содержимого
+		contentFound := false
+
+		// Упрощенная проверка - ищем сигнатуры ключевых файлов
+		for file := range requiredFiles {
+			if bytes.Contains(data, []byte(file)) {
+				requiredFiles[file] = true
+			}
+		}
+
+		// Проверяем наличие специфичного контента
+		if bytes.Contains(data, []byte(contentType)) {
+			contentFound = true
+		}
+
+		// Все обязательные файлы должны присутствовать и должен быть соответствующий контент
+		for _, found := range requiredFiles {
+			if !found {
+				return false
+			}
+		}
+		return contentFound
 	}
-	return true
 }
 
 // validateZipFile проверяет, является ли файл ZIP-архивом
@@ -176,11 +168,16 @@ func validateZipFile(data []byte) bool {
 	if len(data) < 4 {
 		return false
 	}
-	// Проверяем сигнатуру
-	if !bytes.Equal(data[:4], []byte{0x50, 0x4B, 0x03, 0x04}) {
+	return bytes.Equal(data[:4], []byte{0x50, 0x4B, 0x03, 0x04})
+}
+
+// validateOpenDocument проверяет OpenDocument файлы
+func validateOpenDocument(data []byte) bool {
+	if !validateZipFile(data) {
 		return false
 	}
-	return true
+	return bytes.Contains(data, []byte("mimetype")) &&
+		bytes.Contains(data, []byte("content.xml"))
 }
 
 // validateJpeg проверяет JPEG файл
@@ -220,41 +217,6 @@ func validatePdf(data []byte) bool {
 		}
 	}
 	return false
-}
-
-// validateText проверяет, является ли файл текстовым
-func validateText(data []byte) bool {
-	if len(data) == 0 {
-		return false
-	}
-	// Проверяем на наличие непечатных символов (кроме \t, \n, \r)
-	for _, b := range data {
-		if b < 32 && b != 9 && b != 10 && b != 13 {
-			return false
-		}
-	}
-	return true
-}
-
-// validatePE проверяет PE файл (EXE/DLL)
-func validatePE(data []byte) bool {
-	if len(data) < 0x40 {
-		return false
-	}
-	// Проверяем сигнатуру MZ
-	if !bytes.Equal(data[:2], []byte{0x4D, 0x5A}) {
-		return false
-	}
-	// Получаем смещение PE заголовка
-	peOffset := int(data[0x3C]) | int(data[0x3D])<<8 | int(data[0x3E])<<16 | int(data[0x3F])<<24
-	if peOffset+4 > len(data) {
-		return false
-	}
-	// Проверяем сигнатуру PE
-	if !bytes.Equal(data[peOffset:peOffset+4], []byte{0x50, 0x45, 0x00, 0x00}) {
-		return false
-	}
-	return true
 }
 
 // findFileSignatures ищет все известные сигнатуры в данных
@@ -346,7 +308,7 @@ func extractFile(data []byte, outputDir string, counter int) (int, error) {
 		}
 	}
 
-	// Ограничиваем максимальный размер файла (чтобы не выйти за пределы данных)
+	// Ограничиваем максимальный размер файла
 	if fileEnd > len(data) {
 		fileEnd = len(data)
 	}
