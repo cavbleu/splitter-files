@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // FileSignature определяет сигнатуру файла и его расширение
@@ -98,7 +100,7 @@ var fileSignatures = []FileSignature{
 		Offset:      0,
 		Validator:   validateJpeg,
 	},
-	// PDF
+	// PDF (улучшенная проверка)
 	{
 		Extension:   "pdf",
 		MagicNumber: []byte{0x25, 0x50, 0x44, 0x46},
@@ -362,23 +364,57 @@ func validateJpeg(data []byte) bool {
 	return false
 }
 
-// validatePdf проверяет PDF файл
+// validatePdf проверяет PDF файл (улучшенная версия)
 func validatePdf(data []byte) bool {
-	if len(data) < 8 {
+	// Минимальный размер PDF - 100 байт (практически не бывает меньше)
+	if len(data) < 100 {
 		return false
 	}
-	// Начало PDF
-	if !bytes.Equal(data[:4], []byte{0x25, 0x50, 0x44, 0x46}) {
+
+	// 1. Проверка заголовка PDF
+	if !bytes.HasPrefix(data, []byte("%PDF-")) {
 		return false
 	}
-	// Проверяем конец файла
+
+	// 2. Проверка версии PDF (1.0-2.0)
 	if len(data) >= 8 {
-		tail := data[len(data)-8:]
-		if bytes.Contains(tail, []byte("%%EOF")) {
-			return true
+		version := string(data[5:8])
+		if version < "1.0" || version > "2.0" {
+			return false
 		}
 	}
-	return false
+
+	// 3. Проверка наличия xref таблицы (косвенно указывает на валидность структуры)
+	if !bytes.Contains(data, []byte("xref")) {
+		return false
+	}
+
+	// 4. Проверка наличия объектов (должен быть хотя бы один)
+	if !bytes.Contains(data, []byte(" 0 obj")) && !bytes.Contains(data, []byte("\n0 obj")) {
+		return false
+	}
+
+	// 5. Проверка конца файла
+	eofPos := bytes.LastIndex(data, []byte("%%EOF"))
+	if eofPos == -1 {
+		return false
+	}
+
+	// 6. Проверка корректного конечного маркера
+	// Должен быть либо %%EOF, либо %%EOF\r, либо %%EOF\n, либо %%EOF\r\n
+	if eofPos+5 < len(data) {
+		trailer := data[eofPos+5]
+		if trailer != '\r' && trailer != '\n' && trailer != ' ' && trailer != '\t' {
+			return false
+		}
+	}
+
+	// 7. Проверка на линейные PDF (должен быть startxref перед %%EOF)
+	if !bytes.Contains(data[:eofPos], []byte("startxref")) {
+		return false
+	}
+
+	return true
 }
 
 // findFileSignatures ищет все известные сигнатуры в данных
@@ -413,9 +449,10 @@ func findFileSignatures(data []byte) []FileSignature {
 
 // FileChunk представляет часть данных для обработки
 type FileChunk struct {
-	Data    []byte
-	Start   int
-	Counter int32
+	Data     []byte
+	Start    int
+	Counter  int32
+	Priority int // 0 - normal, 1 - high (for office files)
 }
 
 // ExtractionResult содержит результат извлечения файла
@@ -430,6 +467,8 @@ type ExtractionResult struct {
 
 // extractFile пытается извлечь файл из данных
 func extractFile(data []byte, outputDir string, counter int32) (int, string, string, *OfficeDocumentInfo, error) {
+	const minFileSize = 2 * 1024 // 2 KB minimum file size
+
 	foundSigs := findFileSignatures(data)
 	if len(foundSigs) == 0 {
 		return 0, "", "", nil, errors.New("no known file signatures found")
@@ -441,6 +480,7 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 	fileType := strings.ToUpper(ext)
 
 	var officeInfo *OfficeDocumentInfo
+	// Удалена неиспользуемая переменная isOfficeFile
 
 	// Для Office-файлов собираем дополнительную информацию
 	if strings.HasPrefix(ext, "doc") || strings.HasPrefix(ext, "xls") || strings.HasPrefix(ext, "ppt") {
@@ -495,9 +535,18 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 		}
 		fileType = "JPEG Image"
 	case "pdf":
-		// Ищем конец PDF
+		// Ищем конец PDF (улучшенная проверка)
 		if idx := bytes.LastIndex(data, []byte("%%EOF")); idx != -1 {
 			fileEnd = idx + 5
+			// Проверяем корректность конца файла
+			if fileEnd < len(data) {
+				trailer := data[fileEnd]
+				if trailer == '\r' || trailer == '\n' {
+					fileEnd++
+				} else if fileEnd+1 < len(data) && data[fileEnd] == '\r' && data[fileEnd+1] == '\n' {
+					fileEnd += 2
+				}
+			}
 		}
 		fileType = "PDF Document"
 	case "zip", "docx", "xlsx", "pptx", "odt":
@@ -546,9 +595,9 @@ func extractFile(data []byte, outputDir string, counter int32) (int, string, str
 		fileEnd = len(data)
 	}
 
-	// Если файл слишком маленький, пропускаем
-	if fileEnd < 10 {
-		return 0, "", "", nil, errors.New("file too small")
+	// Проверяем минимальный размер файла
+	if fileEnd < minFileSize {
+		return 0, "", "", nil, fmt.Errorf("file too small (less than %d bytes)", minFileSize)
 	}
 
 	fileData := data[:fileEnd]
@@ -584,6 +633,53 @@ func worker(id int, jobs <-chan FileChunk, results chan<- ExtractionResult, outp
 			OfficeInfo: officeInfo,
 		}
 	}
+}
+
+// getPhysicalCPUCount возвращает количество физических ядер процессора
+func getPhysicalCPUCount() int {
+	// По умолчанию возвращаем количество логических процессоров
+	// Для Linux/Unix можно прочитать /proc/cpuinfo для получения физических ядер
+	// Для Windows используем runtime.NumCPU() (нет простого способа получить физические ядра)
+
+	// Для Linux/Unix/MacOS
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" || runtime.GOOS == "freebsd" {
+		data, err := ioutil.ReadFile("/proc/cpuinfo")
+		if err == nil {
+			// Подсчитываем количество уникальных физических ядер
+			physicalIDs := make(map[string]bool)
+			re := regexp.MustCompile(`physical id\s*:\s*(\d+)`)
+			matches := re.FindAllStringSubmatch(string(data), -1)
+			for _, match := range matches {
+				if len(match) > 1 {
+					physicalIDs[match[1]] = true
+				}
+			}
+
+			if len(physicalIDs) > 0 {
+				// Теперь подсчитываем ядра на каждом физическом процессоре
+				coresPerCPU := make(map[string]int)
+				reCore := regexp.MustCompile(`physical id\s*:\s*(\d+).*?cpu cores\s*:\s*(\d+)`)
+				matchesCore := reCore.FindAllStringSubmatch(string(data), -1)
+				for _, match := range matchesCore {
+					if len(match) > 2 {
+						coresPerCPU[match[1]] = coresPerCPU[match[1]] + 1
+					}
+				}
+
+				totalCores := 0
+				for _, cores := range coresPerCPU {
+					totalCores += cores
+				}
+
+				if totalCores > 0 {
+					return totalCores
+				}
+			}
+		}
+	}
+
+	// Возвращаем количество логических процессоров, если не удалось определить физические
+	return runtime.NumCPU()
 }
 
 // processFile обрабатывает входной файл многопоточно
@@ -647,31 +743,78 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 		}
 	}()
 
-	// Отправляем задачи воркерам
+	// Отправляем задачи воркерам с улучшенной логикой управления потоком
 	pos := 0
 	var counter int32 = 1
-	for pos < len(data) {
-		remaining := data[pos:]
-		if len(remaining) < 8 { // Минимальный размер для любой сигнатуры
-			break
-		}
+	const maxRetries = 3
+	const backoffTime = 100 * time.Millisecond
 
-		// Создаем задачу для воркера
-		chunk := FileChunk{
-			Data:    remaining,
-			Start:   pos,
-			Counter: counter,
-		}
+	// Приоритетная очередь для Office файлов
+	officeQueue := make([]FileChunk, 0)
+	regularQueue := make([]FileChunk, 0)
 
-		// Отправляем задачу (неблокирующе, если канал полон)
-		select {
-		case jobs <- chunk:
-			pos++
-			counter++
-		default:
-			// Если канал задач полон, ждем немного
-			// В реальном приложении можно добавить более сложную логику
+	for pos < len(data) || len(officeQueue) > 0 || len(regularQueue) > 0 {
+		// Сначала обрабатываем очередь Office файлов
+		if len(officeQueue) > 0 {
+			chunk := officeQueue[0]
+			select {
+			case jobs <- chunk:
+				officeQueue = officeQueue[1:]
+				counter++
+			case <-time.After(backoffTime):
+				// Канал полон, ждем и оставляем в очереди
+			}
 			continue
+		}
+
+		// Затем обрабатываем обычную очередь
+		if len(regularQueue) > 0 {
+			chunk := regularQueue[0]
+			select {
+			case jobs <- chunk:
+				regularQueue = regularQueue[1:]
+				counter++
+			case <-time.After(backoffTime):
+				// Канал полон, ждем и оставляем в очереди
+			}
+			continue
+		}
+
+		// Если очереди пусты, добавляем новые задачи
+		if pos < len(data) {
+			remaining := data[pos:]
+			if len(remaining) < 8 { // Минимальный размер для любой сигнатуры
+				break
+			}
+
+			// Проверяем, является ли это Office файлом
+			var isOfficeFile bool
+			foundSigs := findFileSignatures(remaining)
+			for _, sig := range foundSigs {
+				if strings.HasPrefix(sig.Extension, "doc") ||
+					strings.HasPrefix(sig.Extension, "xls") ||
+					strings.HasPrefix(sig.Extension, "ppt") {
+					isOfficeFile = true
+					break
+				}
+			}
+
+			// Создаем задачу для воркера
+			chunk := FileChunk{
+				Data:     remaining,
+				Start:    pos,
+				Counter:  counter,
+				Priority: 0,
+			}
+
+			if isOfficeFile {
+				chunk.Priority = 1
+				officeQueue = append(officeQueue, chunk)
+			} else {
+				regularQueue = append(regularQueue, chunk)
+			}
+
+			pos++
 		}
 	}
 
@@ -694,20 +837,19 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Println("Usage: file_splitter <input_file> <output_directory> [num_workers]")
-		fmt.Println("Default number of workers is 4")
+		fmt.Println("Default number of workers is equal to physical CPU cores")
 		os.Exit(1)
 	}
 
 	inputFile := os.Args[1]
 	outputDir := os.Args[2]
 
-	// Определяем количество воркеров
-	numWorkers := 4
+	// Определяем количество воркеров (по умолчанию - количество физических ядер)
+	numWorkers := getPhysicalCPUCount()
 	if len(os.Args) > 3 {
 		_, err := fmt.Sscanf(os.Args[3], "%d", &numWorkers)
 		if err != nil || numWorkers < 1 {
-			fmt.Println("Invalid number of workers, using default (4)")
-			numWorkers = 4
+			fmt.Printf("Invalid number of workers, using default (%d physical cores)\n", numWorkers)
 		}
 	}
 
@@ -725,7 +867,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Processing file %s (%d bytes) with %d workers\n", inputFile, len(data), numWorkers)
+	fmt.Printf("Processing file %s (%d bytes) with %d workers (physical cores)\n", inputFile, len(data), numWorkers)
 
 	// Обрабатываем файл многопоточно
 	extracted, results, err := processFile(data, outputDir, numWorkers)
