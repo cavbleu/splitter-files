@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
 )
 
 // FileSignature определяет сигнатуру файла и его расширение
@@ -249,11 +252,26 @@ func findFileSignatures(data []byte) []FileSignature {
 	return found
 }
 
+// FileChunk представляет часть данных для обработки
+type FileChunk struct {
+	Data    []byte
+	Start   int
+	Counter int32
+}
+
+// ExtractionResult содержит результат извлечения файла
+type ExtractionResult struct {
+	Filename string
+	Size     int
+	Counter  int32
+	Error    error
+}
+
 // extractFile пытается извлечь файл из данных
-func extractFile(data []byte, outputDir string, counter int) (int, error) {
+func extractFile(data []byte, outputDir string, counter int32) (int, string, error) {
 	foundSigs := findFileSignatures(data)
 	if len(foundSigs) == 0 {
-		return 0, errors.New("no known file signatures found")
+		return 0, "", errors.New("no known file signatures found")
 	}
 
 	// Выбираем первую подходящую сигнатуру
@@ -315,30 +333,135 @@ func extractFile(data []byte, outputDir string, counter int) (int, error) {
 
 	// Если файл слишком маленький, пропускаем
 	if fileEnd < 10 {
-		return 0, errors.New("file too small")
+		return 0, "", errors.New("file too small")
 	}
 
 	fileData := data[:fileEnd]
 
 	// Создаем имя файла
-	filename := fmt.Sprintf("%s/file_%04d.%s", outputDir, counter, ext)
+	filename := filepath.Join(outputDir, fmt.Sprintf("file_%04d.%s", counter, ext))
 	err := ioutil.WriteFile(filename, fileData, 0644)
 	if err != nil {
-		return 0, fmt.Errorf("failed to write file %s: %v", filename, err)
+		return 0, "", fmt.Errorf("failed to write file %s: %v", filename, err)
 	}
 
-	fmt.Printf("Extracted %s (%d bytes)\n", filename, len(fileData))
-	return fileEnd, nil
+	return fileEnd, filename, nil
+}
+
+// worker обрабатывает задачи из канала и отправляет результаты
+func worker(id int, jobs <-chan FileChunk, results chan<- ExtractionResult, outputDir string, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for chunk := range jobs {
+		processed, filename, err := extractFile(chunk.Data, outputDir, chunk.Counter)
+		if err != nil {
+			results <- ExtractionResult{
+				Error:   fmt.Errorf("worker %d: %v", id, err),
+				Counter: chunk.Counter,
+			}
+			continue
+		}
+
+		results <- ExtractionResult{
+			Filename: filename,
+			Size:     processed,
+			Counter:  chunk.Counter,
+		}
+	}
+}
+
+// processFile обрабатывает входной файл многопоточно
+func processFile(data []byte, outputDir string, numWorkers int) (int, error) {
+	// Создаем каналы для задач и результатов
+	jobs := make(chan FileChunk, numWorkers*2)
+	results := make(chan ExtractionResult, numWorkers*2)
+
+	// Создаем воркеров
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go worker(i, jobs, results, outputDir, &wg)
+	}
+
+	// Запускаем горутину для сбора результатов
+	var extractedFiles int32
+	var processingErrors []error
+	var resultWg sync.WaitGroup
+	resultWg.Add(1)
+	go func() {
+		defer resultWg.Done()
+		for result := range results {
+			if result.Error != nil {
+				processingErrors = append(processingErrors, result.Error)
+				continue
+			}
+			atomic.AddInt32(&extractedFiles, 1)
+			fmt.Printf("Extracted %s (%d bytes)\n", result.Filename, result.Size)
+		}
+	}()
+
+	// Отправляем задачи воркерам
+	pos := 0
+	var counter int32 = 1
+	for pos < len(data) {
+		remaining := data[pos:]
+		if len(remaining) < 8 { // Минимальный размер для любой сигнатуры
+			break
+		}
+
+		// Создаем задачу для воркера
+		chunk := FileChunk{
+			Data:    remaining,
+			Start:   pos,
+			Counter: counter,
+		}
+
+		// Отправляем задачу (неблокирующе, если канал полон)
+		select {
+		case jobs <- chunk:
+			pos++
+			counter++
+		default:
+			// Если канал задач полон, ждем немного
+			// В реальном приложении можно добавить более сложную логику
+			continue
+		}
+	}
+
+	// Закрываем канал задач и ждем завершения воркеров
+	close(jobs)
+	wg.Wait()
+
+	// Закрываем канал результатов и ждем завершения сборщика результатов
+	close(results)
+	resultWg.Wait()
+
+	// Проверяем ошибки
+	if len(processingErrors) > 0 {
+		return int(extractedFiles), fmt.Errorf("encountered %d processing errors", len(processingErrors))
+	}
+
+	return int(extractedFiles), nil
 }
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("Usage: file_splitter <input_file> <output_directory>")
+		fmt.Println("Usage: file_splitter <input_file> <output_directory> [num_workers]")
+		fmt.Println("Default number of workers is 4")
 		os.Exit(1)
 	}
 
 	inputFile := os.Args[1]
 	outputDir := os.Args[2]
+
+	// Определяем количество воркеров
+	numWorkers := 4
+	if len(os.Args) > 3 {
+		_, err := fmt.Sscanf(os.Args[3], "%d", &numWorkers)
+		if err != nil || numWorkers < 1 {
+			fmt.Println("Invalid number of workers, using default (4)")
+			numWorkers = 4
+		}
+	}
 
 	// Читаем входной файл
 	data, err := ioutil.ReadFile(inputFile)
@@ -354,27 +477,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Processing file %s (%d bytes)\n", inputFile, len(data))
+	fmt.Printf("Processing file %s (%d bytes) with %d workers\n", inputFile, len(data), numWorkers)
 
-	// Обрабатываем файл
-	pos := 0
-	counter := 1
-	for pos < len(data) {
-		remaining := data[pos:]
-		if len(remaining) < 8 { // Минимальный размер для любой сигнатуры
-			break
-		}
-
-		processed, err := extractFile(remaining, outputDir, counter)
-		if err != nil {
-			// Пропускаем байт и продолжаем
-			pos++
-			continue
-		}
-
-		pos += processed
-		counter++
+	// Обрабатываем файл многопоточно
+	extracted, err := processFile(data, outputDir, numWorkers)
+	if err != nil {
+		fmt.Printf("Processing completed with errors: %v\n", err)
 	}
 
-	fmt.Printf("Extracted %d files to %s\n", counter-1, outputDir)
+	fmt.Printf("Extracted %d files to %s\n", extracted, outputDir)
 }
