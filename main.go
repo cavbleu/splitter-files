@@ -213,6 +213,33 @@ var fileSignatures = []FileSignature{
 		Offset:      0,
 		Validator:   validateOpenDocument,
 	},
+	// ODS (OpenDocument Spreadsheet)
+	{
+		Extension:   "ods",
+		MagicNumber: []byte{0x50, 0x4B, 0x03, 0x04},
+		Offset:      0,
+		Validator:   validateOpenDocument,
+	},
+	// OTS (OpenDocument Spreadsheet Template)
+	{
+		Extension:   "ots",
+		MagicNumber: []byte{0x50, 0x4B, 0x03, 0x04},
+		Offset:      0,
+		Validator:   validateOpenDocument,
+	},
+	// FODS (Flat XML OpenDocument Spreadsheet)
+	{
+		Extension:   "fods",
+		MagicNumber: []byte{0x3C, 0x3F, 0x78, 0x6D, 0x6C, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x3D, 0x22, 0x31, 0x2E, 0x30, 0x22, 0x3F, 0x3E},
+		Offset:      0,
+	},
+	// ODP (OpenDocument Presentation)
+	{
+		Extension:   "odp",
+		MagicNumber: []byte{0x50, 0x4B, 0x03, 0x04},
+		Offset:      0,
+		Validator:   validateOpenDocument,
+	},
 	// ZIP
 	{
 		Extension:   "zip",
@@ -447,6 +474,9 @@ func validateZipFile(data []byte) bool {
 
 func validateOpenDocument(data []byte) bool {
 	if !validateZipFile(data) {
+		if bytes.HasPrefix(data, []byte("<?xml version=\"1.0\"?>")) {
+			return bytes.Contains(data, []byte("office:document"))
+		}
 		return false
 	}
 
@@ -456,6 +486,7 @@ func validateOpenDocument(data []byte) bool {
 	}
 
 	var hasMimetype, hasContent bool
+	var mimeType string
 
 	for _, file := range zipReader.File {
 		switch file.Name {
@@ -471,11 +502,19 @@ func validateOpenDocument(data []byte) bool {
 				continue
 			}
 
-			if bytes.Contains(mimeData, []byte("application/vnd.oasis.opendocument.text")) {
+			mimeType = string(mimeData)
+			switch {
+			case strings.Contains(mimeType, "application/vnd.oasis.opendocument.text"):
+				hasMimetype = true
+			case strings.Contains(mimeType, "application/vnd.oasis.opendocument.spreadsheet"):
+				hasMimetype = true
+			case strings.Contains(mimeType, "application/vnd.oasis.opendocument.presentation"):
+				hasMimetype = true
+			case strings.Contains(mimeType, "application/vnd.oasis.opendocument.spreadsheet-template"):
 				hasMimetype = true
 			}
 
-		case "content.xml":
+		case "content.xml", "styles.xml":
 			hasContent = true
 		}
 	}
@@ -699,6 +738,12 @@ func extractFile(data []byte, outputDir string, counter int32, startPos int, all
 			fileType = "OpenDocument Text"
 		case "zip":
 			fileType = "ZIP Archive"
+		case "ods", "ots":
+			fileType = "OpenDocument Spreadsheet"
+		case "fods":
+			fileType = "Flat XML OpenDocument Spreadsheet"
+		case "odp":
+			fileType = "OpenDocument Presentation"
 		}
 	case "doc":
 		fileType = "Word Document (Binary)"
@@ -1077,7 +1122,7 @@ func main() {
 		fmt.Println("\nUsage: file-splitter [flags] <input_file> <output_directory> [num_workers]")
 		fmt.Println("\nFlags:")
 		flag.PrintDefaults()
-		fmt.Println("\nSupported file extensions: doc, docx, ppt, pptx, xls, xlsx, jpg, jpeg, pdf, rtf, odt, zip, html")
+		fmt.Println("\nSupported file extensions: doc, docx, ppt, pptx, xls, xlsx, jpg, jpeg, pdf, rtf, odt, ods, odp, ots, fods, zip, html")
 		fmt.Println("\nExamples:")
 		fmt.Println("  file-splitter -ext pdf,jpg,docx data.bin output_dir")
 		fmt.Println("  file-splitter -ext all data.bin output_dir 8")
