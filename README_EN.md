@@ -18,6 +18,7 @@ A forensic file carving utility designed to:
 #### 2. Installation and Usage
 
 **Compilation:**
+# Windows:
 ```powershell
 # Windows (requires Go installation):
 go build -o splitter-files.exe main.go
@@ -30,12 +31,68 @@ go build -o splitter-files main.go
 chmod +x filecarver
 ```
 
-**Execution:**
+---
+
+## Usage
+Basic command format:
 ```bash
-./splitter-files <input_file> <output_dir> [threads]
-# Example:
-./splitter-files bin recovered_files 8
+./file-splitter [flags] <input_file> <output_directory> [num_workers]
 ```
+
+### Flags
+| Flag        | Description                                      |
+|-------------|--------------------------------------------------|
+| `-version`  | Show program version and exit                    |
+| `-ext`      | Comma-separated list of extensions to extract (or "all" for all supported types) |
+
+### Examples
+
+1. Extract all supported file types:
+   ```bash
+   ./file-splitter data.bin output_dir
+   ```
+
+2. Extract only PDF and JPEG files:
+   ```bash
+   ./file-splitter -ext pdf,jpg data.bin output_dir
+   ```
+
+3. Extract all supported types with 8 worker threads:
+   ```bash
+   ./file-splitter -ext all data.bin output_dir 8
+   ```
+
+4. Show version information:
+   ```bash
+   ./file-splitter -version
+   ```
+
+### Supported File Extensions
+The program can extract these file types:
+- Documents: `doc`, `docx`, `ppt`, `pptx`, `xls`, `xlsx`, `odt`, `rtf`, `pdf`
+- Images: `jpg`, `jpeg`
+- Archives: `zip`
+- Web: `html`
+
+## Output
+The program provides:
+- Real-time progress of extracted files
+- Detailed statistics including:
+  - File types distribution
+  - Data coverage percentage
+  - Uncovered areas
+  - Office document properties (encryption, macros)
+
+## Tips
+1. For large files, increase the number of workers (up to your CPU core count)
+2. Use `-ext` to speed up processing by limiting to specific file types
+3. Check the statistics for potential file carving issues
+
+## Troubleshooting
+- **"No known file signatures found"**: The input may not contain supported file types
+- **Low coverage warning**: The input may have corrupted or unsupported files
+- **Permission errors**: Ensure you have write access to the output directory
+
 
 #### 3. Technical Implementation
 
