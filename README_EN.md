@@ -18,11 +18,13 @@ A forensic file carving utility designed to:
 #### 2. Installation and Usage
 
 **Compilation:**
-```bash
+```powershell
 # Windows (requires Go installation):
 go build -o splitter-files.exe main.go
+```
 
 # Linux:
+```bash
 sudo apt install golang
 go build -o splitter-files main.go
 chmod +x filecarver
