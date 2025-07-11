@@ -134,7 +134,7 @@ The program provides:
 
 **Functional Limitations:**
 - Format Support:
-  - Unsupported: Media files (MP4/MP3), databases, proprietary formats
+  - Unsupported: Media files (MP4/MP3), databases, proprietary formats.
 - Encryption:
   - Detects but cannot break encryption (AES-256, etc.)
   - No password recovery capability

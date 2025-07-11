@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -17,7 +18,11 @@ import (
 	"time"
 )
 
-// FileSignature определяет сигнатуру файла и его расширение
+const (
+	Version = "1.1.3"
+)
+
+// FileSignature defines a file signature and its extension
 type FileSignature struct {
 	Extension   string
 	MagicNumber []byte
@@ -25,7 +30,7 @@ type FileSignature struct {
 	Validator   func([]byte) bool
 }
 
-// OfficeFileType определяет тип Office-документа
+// OfficeFileType defines the type of Office document
 type OfficeFileType int
 
 const (
@@ -35,7 +40,7 @@ const (
 	PowerPointDocument
 )
 
-// OfficeDocumentInfo содержит информацию об Office-документе
+// OfficeDocumentInfo contains information about an Office document
 type OfficeDocumentInfo struct {
 	Type        OfficeFileType
 	Version     string
@@ -43,7 +48,7 @@ type OfficeDocumentInfo struct {
 	IsMacro     bool
 }
 
-// ExtractionResult содержит результат извлечения файла
+// ExtractionResult contains the result of file extraction
 type ExtractionResult struct {
 	Filename   string
 	Size       int
@@ -55,7 +60,7 @@ type ExtractionResult struct {
 	OfficeInfo *OfficeDocumentInfo
 }
 
-// ExtractionStats содержит статистику по извлечению данных
+// ExtractionStats contains extraction statistics
 type ExtractionStats struct {
 	TotalExtracted int
 	TotalSize      int64
@@ -69,7 +74,69 @@ type ExtractionStats struct {
 	FileTypes map[string]int
 }
 
-// Сигнатуры файлов с валидаторами
+// FileProcessor interface defines the contract for file processing
+type FileProcessor interface {
+	Process(data []byte, outputDir string, counter int32, startPos int, allowedExtensions map[string]bool) (int, int, string, string, *OfficeDocumentInfo, error)
+}
+
+// DefaultFileProcessor implements the basic file processing
+type DefaultFileProcessor struct{}
+
+func (p *DefaultFileProcessor) Process(data []byte, outputDir string, counter int32, startPos int, allowedExtensions map[string]bool) (int, int, string, string, *OfficeDocumentInfo, error) {
+	return extractFile(data, outputDir, counter, startPos, allowedExtensions)
+}
+
+// FileValidator interface defines the contract for file validation
+type FileValidator interface {
+	Validate(data []byte) bool
+}
+
+// MSOfficeValidator validates Microsoft Office files
+type MSOfficeValidator struct{}
+
+func (v *MSOfficeValidator) Validate(data []byte) bool {
+	return validateMSOfficeFile(data)
+}
+
+// OfficeOpenXMLValidator validates Office Open XML files
+type OfficeOpenXMLValidator struct {
+	expectedContent string
+	expectedType    OfficeFileType
+}
+
+func (v *OfficeOpenXMLValidator) Validate(data []byte) bool {
+	return validateOfficeOpenXML(v.expectedContent, v.expectedType)(data)
+}
+
+// JPEGValidator validates JPEG files with improved checking
+type JPEGValidator struct{}
+
+func (v *JPEGValidator) Validate(data []byte) bool {
+	return validateJpegImproved(data)
+}
+
+// Strategy pattern for file processing
+type ProcessingStrategy interface {
+	Execute(data []byte, outputDir string, counter int32, startPos int, allowedExtensions map[string]bool) (int, int, string, string, *OfficeDocumentInfo, error)
+}
+
+type DefaultProcessingStrategy struct {
+	processor FileProcessor
+}
+
+func (s *DefaultProcessingStrategy) Execute(data []byte, outputDir string, counter int32, startPos int, allowedExtensions map[string]bool) (int, int, string, string, *OfficeDocumentInfo, error) {
+	return s.processor.Process(data, outputDir, counter, startPos, allowedExtensions)
+}
+
+// FileChunk represents a file chunk for processing
+type FileChunk struct {
+	Data     []byte
+	Start    int
+	Counter  int32
+	Priority int
+}
+
+// File signatures with validators
 var fileSignatures = []FileSignature{
 	// DOC (Microsoft Word Document)
 	{
@@ -113,20 +180,20 @@ var fileSignatures = []FileSignature{
 		Offset:      0,
 		Validator:   validateOfficeOpenXML("xl/", ExcelDocument),
 	},
-	// JPEG
+	// JPEG (improved validation)
 	{
 		Extension:   "jpg",
 		MagicNumber: []byte{0xFF, 0xD8, 0xFF},
 		Offset:      0,
-		Validator:   validateJpeg,
+		Validator:   validateJpegImproved,
 	},
 	{
 		Extension:   "jpeg",
 		MagicNumber: []byte{0xFF, 0xD8, 0xFF},
 		Offset:      0,
-		Validator:   validateJpeg,
+		Validator:   validateJpegImproved,
 	},
-	// PDF (улучшенная проверка)
+	// PDF (improved validation)
 	{
 		Extension:   "pdf",
 		MagicNumber: []byte{0x25, 0x50, 0x44, 0x46},
@@ -171,7 +238,12 @@ var fileSignatures = []FileSignature{
 	},
 }
 
-// ContentTypes представляет структуру [Content_Types].xml в Office Open XML
+var (
+	versionFlag    = flag.Bool("version", false, "Print version information")
+	extensionsFlag = flag.String("ext", "", "Comma-separated list of file extensions to extract (e.g. 'pdf,jpg,docx')")
+)
+
+// ContentTypes represents [Content_Types].xml in Office Open XML
 type ContentTypes struct {
 	XMLName xml.Name `xml:"Types"`
 	Default []struct {
@@ -184,12 +256,60 @@ type ContentTypes struct {
 	} `xml:"Override"`
 }
 
-// FileChunk представляет часть файла для обработки
-type FileChunk struct {
-	Data     []byte
-	Start    int
-	Counter  int32
-	Priority int
+// WorkerPool manages worker goroutines
+type WorkerPool struct {
+	numWorkers int
+	jobs       chan FileChunk
+	results    chan ExtractionResult
+	wg         *sync.WaitGroup
+}
+
+func NewWorkerPool(numWorkers int) *WorkerPool {
+	return &WorkerPool{
+		numWorkers: numWorkers,
+		jobs:       make(chan FileChunk, numWorkers*2),
+		results:    make(chan ExtractionResult, numWorkers*2),
+		wg:         &sync.WaitGroup{},
+	}
+}
+
+func (wp *WorkerPool) Start(outputDir string, allowedExtensions map[string]bool) {
+	for i := 0; i < wp.numWorkers; i++ {
+		wp.wg.Add(1)
+		go worker(i, wp.jobs, wp.results, outputDir, wp.wg, allowedExtensions)
+	}
+}
+
+func (wp *WorkerPool) Stop() {
+	close(wp.jobs)
+	wp.wg.Wait()
+	close(wp.results)
+}
+
+// Improved JPEG validation
+func validateJpegImproved(data []byte) bool {
+	// Minimum JPEG size is about 4 bytes
+	if len(data) < 4 {
+		return false
+	}
+
+	// Check for Start of Image (SOI) marker
+	if !bytes.HasPrefix(data, []byte{0xFF, 0xD8, 0xFF}) {
+		return false
+	}
+
+	// Check for End of Image (EOI) marker
+	hasEOI := false
+	for i := len(data) - 2; i >= 0; i-- {
+		if data[i] == 0xFF && data[i+1] == 0xD9 {
+			hasEOI = true
+			break
+		}
+	}
+	if !hasEOI {
+		return false
+	}
+	return true
 }
 
 func validateMSOfficeFile(data []byte) bool {
@@ -423,10 +543,15 @@ func validatePdf(data []byte) bool {
 	return true
 }
 
-func findFileSignatures(data []byte) []FileSignature {
+func findFileSignatures(data []byte, allowedExtensions map[string]bool) []FileSignature {
 	var found []FileSignature
 
 	for _, sig := range fileSignatures {
+		// Skip if extension not in allowed list
+		if len(allowedExtensions) > 0 && !allowedExtensions[sig.Extension] {
+			continue
+		}
+
 		if len(sig.MagicNumber) == 0 {
 			continue
 		}
@@ -451,10 +576,10 @@ func findFileSignatures(data []byte) []FileSignature {
 	return found
 }
 
-func extractFile(data []byte, outputDir string, counter int32, startPos int) (int, int, string, string, *OfficeDocumentInfo, error) {
+func extractFile(data []byte, outputDir string, counter int32, startPos int, allowedExtensions map[string]bool) (int, int, string, string, *OfficeDocumentInfo, error) {
 	const minFileSize = 2 * 1024
 
-	foundSigs := findFileSignatures(data)
+	foundSigs := findFileSignatures(data, allowedExtensions)
 	if len(foundSigs) == 0 {
 		return 0, 0, "", "", nil, errors.New("no known file signatures found")
 	}
@@ -537,8 +662,9 @@ func extractFile(data []byte, outputDir string, counter int32, startPos int) (in
 
 	switch ext {
 	case "jpg", "jpeg":
+		// Improved JPEG end detection
 		for i := len(data) - 2; i >= 0; i-- {
-			if data[i] == 0xFF && data[i+1] == 0xD9 {
+			if data[i] == 0xFF && data[i+1] == 0xD9 { // EOI marker
 				fileEnd = i + 2
 				break
 			}
@@ -614,10 +740,14 @@ func extractFile(data []byte, outputDir string, counter int32, startPos int) (in
 	return fileEnd, startPos + fileEnd, filename, fileType, officeInfo, nil
 }
 
-func worker(id int, jobs <-chan FileChunk, results chan<- ExtractionResult, outputDir string, wg *sync.WaitGroup) {
+func worker(id int, jobs <-chan FileChunk, results chan<- ExtractionResult, outputDir string, wg *sync.WaitGroup, allowedExtensions map[string]bool) {
 	defer wg.Done()
+
+	processor := &DefaultFileProcessor{}
+	strategy := &DefaultProcessingStrategy{processor: processor}
+
 	for chunk := range jobs {
-		size, endPos, filename, fileType, officeInfo, err := extractFile(chunk.Data, outputDir, chunk.Counter, chunk.Start)
+		size, endPos, filename, fileType, officeInfo, err := strategy.Execute(chunk.Data, outputDir, chunk.Counter, chunk.Start, allowedExtensions)
 		if err != nil {
 			results <- ExtractionResult{
 				Error:   fmt.Errorf("worker %d: %v", id, err),
@@ -695,14 +825,14 @@ func analyzeUncoveredAreas(covered []bool) []struct{ Start, End int } {
 		uncovered = append(uncovered, struct{ Start, End int }{start, len(covered) - 1})
 	}
 
-	// Объединяем близкие участки
+	// Merge close areas
 	if len(uncovered) > 1 {
 		merged := make([]struct{ Start, End int }, 0)
 		prev := uncovered[0]
 
 		for i := 1; i < len(uncovered); i++ {
 			current := uncovered[i]
-			if current.Start-prev.End < 1024 { // Объединяем если расстояние меньше 1KB
+			if current.Start-prev.End < 1024 { // Merge if distance is less than 1KB
 				prev.End = current.End
 			} else {
 				merged = append(merged, prev)
@@ -716,15 +846,9 @@ func analyzeUncoveredAreas(covered []bool) []struct{ Start, End int } {
 	return uncovered
 }
 
-func processFile(data []byte, outputDir string, numWorkers int) (int, []ExtractionResult, *ExtractionStats, error) {
-	jobs := make(chan FileChunk, numWorkers*2)
-	results := make(chan ExtractionResult, numWorkers*2)
-
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go worker(i, jobs, results, outputDir, &wg)
-	}
+func processFile(data []byte, outputDir string, numWorkers int, allowedExtensions map[string]bool) (int, []ExtractionResult, *ExtractionStats, error) {
+	wp := NewWorkerPool(numWorkers)
+	wp.Start(outputDir, allowedExtensions)
 
 	stats := &ExtractionStats{
 		InputSize: int64(len(data)),
@@ -741,7 +865,7 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 		defer resultWg.Done()
 		extractedRanges := make([][2]int, 0)
 
-		for result := range results {
+		for result := range wp.results {
 			if result.Error != nil {
 				processingErrors = append(processingErrors, result.Error)
 				continue
@@ -799,7 +923,7 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 			}
 		}
 
-		// Анализ покрытия данных
+		// Analyze data coverage
 		covered := make([]bool, len(data))
 		for _, r := range extractedRanges {
 			start := r[0]
@@ -838,7 +962,7 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 		if len(officeQueue) > 0 {
 			chunk := officeQueue[0]
 			select {
-			case jobs <- chunk:
+			case wp.jobs <- chunk:
 				officeQueue = officeQueue[1:]
 				counter++
 			case <-time.After(backoffTime):
@@ -849,7 +973,7 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 		if len(regularQueue) > 0 {
 			chunk := regularQueue[0]
 			select {
-			case jobs <- chunk:
+			case wp.jobs <- chunk:
 				regularQueue = regularQueue[1:]
 				counter++
 			case <-time.After(backoffTime):
@@ -864,7 +988,7 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 			}
 
 			var isOfficeFile bool
-			foundSigs := findFileSignatures(remaining)
+			foundSigs := findFileSignatures(remaining, allowedExtensions)
 			for _, sig := range foundSigs {
 				if strings.HasPrefix(sig.Extension, "doc") ||
 					strings.HasPrefix(sig.Extension, "xls") ||
@@ -892,10 +1016,7 @@ func processFile(data []byte, outputDir string, numWorkers int) (int, []Extracti
 		}
 	}
 
-	close(jobs)
-	wg.Wait()
-
-	close(results)
+	wp.Stop()
 	resultWg.Wait()
 
 	if len(processingErrors) > 0 {
@@ -931,7 +1052,7 @@ func printStats(stats *ExtractionStats) {
 		fmt.Printf("\nUncovered areas (total %d):\n", len(stats.UncoveredAreas))
 		for i, area := range stats.UncoveredAreas {
 			size := area.End - area.Start + 1
-			if i < 10 || size > 1024 { // Показываем первые 10 или большие участки
+			if i < 10 || size > 1024 { // Show first 10 or large areas
 				fmt.Printf("- %8d - %8d (%6d bytes)\n", area.Start, area.End, size)
 			}
 			if i == 10 && len(stats.UncoveredAreas) > 10 {
@@ -943,18 +1064,53 @@ func printStats(stats *ExtractionStats) {
 }
 
 func main() {
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: file_splitter <input_file> <output_directory> [num_workers]")
-		fmt.Println("Default number of workers is equal to physical CPU cores")
+	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("File Splitter version %s\n", Version)
+		os.Exit(0)
+	}
+
+	if len(flag.Args()) < 2 {
+		fmt.Println("File Splitter - tool for extracting embedded files from binary data.")
+		fmt.Println("Version:", Version)
+		fmt.Println("\nUsage: file-splitter [flags] <input_file> <output_directory> [num_workers]")
+		fmt.Println("\nFlags:")
+		flag.PrintDefaults()
+		fmt.Println("\nSupported file extensions: doc, docx, ppt, pptx, xls, xlsx, jpg, jpeg, pdf, rtf, odt, zip, html")
+		fmt.Println("\nExamples:")
+		fmt.Println("  file-splitter -ext pdf,jpg,docx data.bin output_dir")
+		fmt.Println("  file-splitter -ext all data.bin output_dir 8")
+		fmt.Println("\nDefault number of workers is equal to physical CPU cores")
 		os.Exit(1)
 	}
 
-	inputFile := os.Args[1]
-	outputDir := os.Args[2]
+	args := flag.Args()
+	inputFile := args[0]
+	outputDir := args[1]
+
+	// Parse allowed extensions
+	allowedExtensions := make(map[string]bool)
+	if *extensionsFlag != "" {
+		if *extensionsFlag == "all" {
+			// Allow all extensions
+			for _, sig := range fileSignatures {
+				allowedExtensions[sig.Extension] = true
+			}
+		} else {
+			exts := strings.Split(*extensionsFlag, ",")
+			for _, ext := range exts {
+				ext = strings.TrimSpace(strings.ToLower(ext))
+				if ext != "" {
+					allowedExtensions[ext] = true
+				}
+			}
+		}
+	}
 
 	numWorkers := getPhysicalCPUCount()
-	if len(os.Args) > 3 {
-		_, err := fmt.Sscanf(os.Args[3], "%d", &numWorkers)
+	if len(args) > 2 {
+		_, err := fmt.Sscanf(args[2], "%d", &numWorkers)
 		if err != nil || numWorkers < 1 {
 			fmt.Printf("Invalid number of workers, using default (%d physical cores)\n", numWorkers)
 		}
@@ -974,9 +1130,12 @@ func main() {
 
 	fmt.Printf("Processing file %s (%d bytes) with %d workers (physical cores)\n",
 		inputFile, len(data), numWorkers)
+	if len(allowedExtensions) > 0 {
+		fmt.Printf("Extracting only files with extensions: %v\n", getKeys(allowedExtensions))
+	}
 
 	startTime := time.Now()
-	_, results, stats, err := processFile(data, outputDir, numWorkers)
+	_, results, stats, err := processFile(data, outputDir, numWorkers, allowedExtensions)
 	elapsed := time.Since(startTime)
 
 	if err != nil {
@@ -1007,4 +1166,12 @@ func main() {
 	}
 
 	fmt.Printf("\nProcessing completed in %s\n", elapsed)
+}
+
+func getKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
