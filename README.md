@@ -14,6 +14,8 @@
   - PDF (Portable Document Format)
   - RTF (Rich Text Format)
   - ODT (OpenDocument Text)
+  - ODF - Таблицы (OpenDocument Table)
+  - ODP - Презентации (OpenDocument Presentation)
 - **Архивы**: ZIP
 - **Изображения**: JPEG/JPG
 - **Веб-форматы**: HTML
@@ -59,7 +61,7 @@ file-splitter [flags] <input_file> <output_directory> [num_workers]
 - `-ext` - список расширений файлов для извлечения (через запятую) или "all" для всех
 
 **Поддерживаемые расширения:**
-doc, docx, ppt, pptx, xls, xlsx, jpg, jpeg, pdf, rtf, odt, zip, html
+doc, docx, ppt, pptx, xls, xlsx, jpg, jpeg, pdf, rtf, odt, ods, odp, ots, fods, zip, html
 
 **Примеры:**
 
