@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	Version = "1.1.3"
+	Version = "1.1.5"
 )
 
 // FileSignature defines a file signature and its extension
