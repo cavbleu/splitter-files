@@ -1,4 +1,5 @@
-splitter-files.exe
-go.mod
+.exe
+.mod
 splitter-files_modyf*
-Read.md
+.log
+**/logs
