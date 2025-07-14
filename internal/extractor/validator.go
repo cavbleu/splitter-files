@@ -28,6 +28,7 @@ func (v *JPEGValidator) Validate(data []byte) bool {
 	return validateJpegImproved(data)
 }
 
+// Improved JPEG validation
 func validateJpegImproved(data []byte) bool {
 	// Minimum JPEG size is about 4 bytes
 	if len(data) < 4 {

@@ -1,8 +1,0 @@
-type DefaultProcessingStrategy struct {
-	processor FileProcessor
-}
-
-// FileProcessor interface defines the contract for file processing
-type FileProcessor interface {
-	Process(data []byte, outputDir string, counter int32, startPos int, allowedExtensions map[string]bool) (int, int, string, string, *OfficeDocumentInfo, error)
-}

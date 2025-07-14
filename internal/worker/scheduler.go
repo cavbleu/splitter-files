@@ -187,7 +187,7 @@ func ProcessFile(data []byte, outputDir string, numWorkers int, allowedExtension
 	resultWg.Wait()
 
 	if len(processingErrors) > 0 {
-		return int(extractedFiles), results, stats, fmt.Errorf("encountered %d processing errors", len(processingErrors))
+		return results, stats, fmt.Errorf("encountered %d processing errors", len(processingErrors))
 	}
 
 	return results, stats, nil
