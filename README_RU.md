@@ -2,7 +2,7 @@
 
 **Документация/Documentation:**
 
-[`Read to English Language`](docs/README.md)
+[`Read to English Language`](README.md)
 [`Метод востановления данных`](docs/RU/README_method_recovery.md)
 [`Работа в многопоточном режиме`](docs/RU/Readme_thread.md)
 
