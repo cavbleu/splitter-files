@@ -1,5 +1,6 @@
 .exe
-.mod
+*.mod
+go.mod
 splitter-files_modyf*
 .log
 **/logs

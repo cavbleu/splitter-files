@@ -2,7 +2,7 @@
 
 **Documentation:**
 
-[`Читать на Русском языке`](docs/README_RU.md)  
+[`Читать на Русском языке`](docs/RU/README_RU.md)  
 [`Data Recovery Methodology`](docs/EN/README_method_recovery.md)  
 [`Multithreaded Operation`](docs/EN/Readme_thread.md)  
 
