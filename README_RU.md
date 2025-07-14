@@ -49,7 +49,7 @@
 2. Перейдите в папку с программой
 3. Соберите бинарник:
 ```bash
-   go build -o build\splitter-files cmd\app\main.go
+   go build -o build/splitter-files cmd/app/main.go
 ```
 4. Сделайте исполняемым:
 ```bash
@@ -59,7 +59,7 @@
 
 **Использование:**
 ```
-file-splitter [flags] <input_file> <output_directory> [num_workers]
+splitter-files [flags] <input_file> <output_directory> [num_workers]
 ```
 
 **Флаги:**
@@ -73,22 +73,22 @@ doc, docx, ppt, pptx, xls, xlsx, jpg, jpeg, pdf, rtf, odt, ods, odp, ots, fods, 
 
 1. Извлечение только PDF и JPEG файлов:
 ```
-file-splitter -ext pdf,jpg data.bin output_dir
+splitter-files -ext pdf,jpg data.bin output_dir
 ```
 
 2. Извлечение всех поддерживаемых форматов:
 ```
-file-splitter -ext all data.bin output_dir
+splitter-files -ext all data.bin output_dir
 ```
 
 3. Извлечение с указанием количества рабочих потоков:
 ```
-file-splitter -ext docx,xlsx data.bin output_dir 4
+splitter-files -ext docx,xlsx data.bin output_dir 4
 ```
 
 4. Просмотр версии программы:
 ```
-file-splitter -version
+splitter-files -version
 ```
 
 **Примечания:**

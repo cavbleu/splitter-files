@@ -58,7 +58,7 @@ chmod +x splitter-files
 
 **Usage:**  
 ```
-file-splitter [flags] <input_file> <output_directory> [num_workers]
+splitter-files [flags] <input_file> <output_directory> [num_workers]
 ```
 
 **Flags:**  
@@ -72,22 +72,22 @@ doc, docx, ppt, pptx, xls, xlsx, jpg, jpeg, pdf, rtf, odt, ods, odp, ots, fods, 
 
 1. Extract only PDF and JPEG files:  
 ```
-file-splitter -ext pdf,jpg data.bin output_dir
+splitter-files -ext pdf,jpg data.bin output_dir
 ```
 
 2. Extract all supported formats:  
 ```
-file-splitter -ext all data.bin output_dir
+splitter-files -ext all data.bin output_dir
 ```
 
 3. Extract with specified worker threads:  
 ```
-file-splitter -ext docx,xlsx data.bin output_dir 4
+splitter-files -ext docx,xlsx data.bin output_dir 4
 ```
 
 4. Check program version:  
 ```
-file-splitter -version
+splitter-files -version
 ```
 
 **Notes:**  
